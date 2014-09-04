@@ -1696,19 +1696,19 @@ init_mathjax();
 <div class="text_cell_render border-box-sizing rendered_html">
 <h1 id="the-science-of-crawl-1-deduplication-of-web-content">The science of crawl (1): deduplication of web content</h1>
 <p>Here at <a href="http://urx.com">URX</a> we are building the world's first mobile app search API. Backing this API is a search engine containing a large corpus of web documents, meticulously maintained and carefully grown by crawling internet content. We've come to discover that building a functional crawler can be done relatively cheaply, but building a <em>robust</em> crawler requires overcoming a few technical challenges. <a href="http://research.microsoft.com/pubs/121136/1500000017.pdf">Christopher Olston and Marc Najork</a> give a fantastic overview of these challenges; many of our practices are inspired by Olston and his referenced papers.</p>
-<p>In this first installment, I will walk through the duplicate web content problem. When crawling the web using a standard link follower (our favorite being <a href="http://scrapy.org/">Scrapy</a>) it's fairly common to run across the <em>same link</em> more than once. If this link is crawled more than once, a duplicate of this page will be added into our search index. Unless the content has materially changed since the last crawl (topic for another blog post), we will begin to build multiple copies of the same web page in our search index.</p>
-<p>Duplicate pages in a search index poison search results. The goal of a search engine is to return both relevant and diverse documents, allowing users to decide the optimal resolution for their own query. Without deduplication, the top-k results returned for a user's query may be k copies of the same page. This creates a bad user experience. In fact, as the crawler scales out, the likelihood of observing such duplicate poisoning increases. In fact, Google's Matt Cutts believes that <a href="http://searchenginewatch.com/article/2319706/Googles-Matt-Cutts-A-Little-Duplicate-Content-Wont-Hurt-Your-Rankings">up to 20% of web content is duplicated</a>.</p>
-<p>Looking beyond exact duplicate links, a given piece of content can be duplicated across different domains. Now, we have to watch for the <em>same content</em> appearing anywhere on the web. This encourages a solution which looks beyond the URL and assesses similarity among the HTML page. Many pages across domains share <em>similar content</em> - with only an ad counter or a html template differing between pages. We now must look for a solution which measures similarity among web documents. This last problem is referred to as near-duplicate detection.</p>
-<p>Fortunately, the art of detecting duplicate and near-duplicate content is a well researched. We present our deduplication process as a funnel. At the top we aim to detect a large percentage of obvious, exact duplicate content with minimal memory overhead. As you move down the funnel techniques for near-duplicate detection become more robust to small differences in page content at the expense of larger memory requirements. We depict this process below.</p>
+<p>In this first installment, I will walk through the duplicate web content problem. When crawling the web using a standard link follower it's common to run across the <em>same link</em> more than once. If this link is crawled more than once, a duplicate of this page will be added into our search index. Unless the content has materially changed since the last crawl, we will have multiple copies of the same web content in our index.</p>
+<p>Duplicate pages in a search index poison search results. The goal of a search engine is to return both relevant and diverse documents, allowing users to decide the optimal resolution for a query. Without deduplication, the top-k results returned for a user's query will likely contain duplicate content. In the extreme, all k results will be copies of the same page. This creates a bad user experience where, as the crawler scales out, the duplicate likelihood increases. In fact, Google's Matt Cutts believes that <a href="http://searchenginewatch.com/article/2319706/Googles-Matt-Cutts-A-Little-Duplicate-Content-Wont-Hurt-Your-Rankings">up to 20% of web content is duplicated</a>.</p>
+<p>Looking beyond exact duplicates, a given piece of content can be duplicated across different domains. Now, we have to watch for the <em>same content</em> appearing anywhere on the web. This encourages a solution which looks beyond the URL and assesses similarity among the HTML page. Generalizing the problem, many pages across domains share <em>similar content</em> - with only an ad counter or a html template differing between pages. This forces us to look for a solution that measures similarity among web documents, the near-duplicate detection problem.</p>
+<p>Fortunately, the art of detecting duplicate and near-duplicate content is a well researched. We present our deduplication process as a funnel. At the top the aim is to detect a large percentage of obvious, exact duplicate content with minimal overhead. Moving down the funnel the techniques for near-duplicate detection become more robust to small differences in page content at the expense of larger overheads. We depict this process below.</p>
 </div>
 <div class="cell border-box-sizing code_cell vbox">
 <div class="input hbox">
 <div class="prompt input_prompt">
-In&nbsp;[2]:
+In&nbsp;[3]:
 </div>
 <div class="input_area box-flex1">
 <div class="highlight"><pre><span class="kn">from</span> <span class="nn">IPython.display</span> <span class="kn">import</span> <span class="n">Image</span>
-<span class="n">Image</span><span class="p">(</span><span class="s">&#39;funnel.png&#39;</span><span class="p">)</span>
+<span class="n">Image</span><span class="p">(</span><span class="s">&#39;funnel.png&#39;</span><span class="p">,</span> <span class="n">width</span><span class="o">=</span><span class="mi">300</span><span class="p">,</span> <span class="n">height</span><span class="o">=</span><span class="mi">200</span><span class="p">)</span>
 </pre></div>
 
 </div>
@@ -1719,7 +1719,7 @@ In&nbsp;[2]:
 
 
 <div class="hbox output_area"><div class="prompt output_prompt">
-    Out[2]:</div>
+    Out[3]:</div>
 <div class="box-flex1 output_subarea output_pyout">
 
 
@@ -3402,17 +3402,16 @@ IECAAAECBNoV+D+p86vbjXjRtQAAAABJRU5ErkJggg==
 <p>funnel courtesy of <a href="http://thenounproject.com/term/funnel/16253">Nounproject</a></p>
 <p>Let's tackle this one step at a time.</p>
 <h2 id="duplicated-urls">Duplicated URLs</h2>
-<p>The goal at the top of the deduplication funnel is to discover and remove a large number of obvious duplicate URLs. To this end a hash map of previously crawled URLs can be maintained. Unfortunately the memory requirements of such a map will grow large as the number of unique URLs we crawl approaches web scale. To avoid a memory explosion but retain O(1) duplicate lookups, a <a href="http://en.wikipedia.org/wiki/Bloom_filter">bloom filter</a> is used. Bloom filters are beautiful, constant-space, collision data structures with guaranteed perfect recall at the cost of imperfect precision. This means if a URL has been added into the filter it will always be detected as a duplicate. However, a number of new URLs will be falsely declared duplicate. The precision of a bloom filter can be tuned at the expense of additional (constant) memory and compute time. We prefer to err on the side of falsely dropping a small amount of novel content in exchange for removing a majority of duplicate pages.</p>
-<p>Fortunately for us, Scrapy maintains a built in duplicate URL server which avoids re-crawling the same URLs.</p>
+<p>The goal at the top of the deduplication funnel is to discover and remove a large number of obvious duplicate URLs. To this end a hash map of previously crawled URLs can be maintained. Unfortunately the memory requirements of such a map will grow large as the number of unique URLs we crawl approaches web scale. To avoid a memory explosion but retain fast duplicate lookups, a <a href="http://en.wikipedia.org/wiki/Bloom_filter">bloom filter</a> is used. Bloom filters are a beautiful, constant-space, data structure with perfect recall at the cost of imperfect precision. This means if a URL has been added into the filter it will always be detected as a duplicate. However, a number of new URLs will be falsely declared duplicate. The precision of the filter can be tuned at the expense of additional (constant) memory and compute time. We prefer to err on the side of falsely dropping a small amount of novel content in exchange for removing a majority of duplicate pages.</p>
 <h2 id="textually-similar-urls">Textually similar URLs</h2>
-<p>Often URLs for a given page are not <em>exactly</em> the same. There are parameters embedded within a url which may differ. For example, both of these pages, <a href="http://www.ticketmaster.com/find_area?uri=CXytLWipvCaGhte_tQzTp0O9MzMQMviG8MCcHbagtjuf3SsE5_M6PlChy4GjP_1Ln7vBed7M88xtpH7cVmUpPmUM0q9fqRr6ymCe41xw2aSoRE9keOLA&amp;tm_link=tm_changeloc_cities">P1</a> and <a href="http://www.ticketmaster.com/find_area?uri=-OCUK0S8BLqb91tB1ek70WLlxFbd3qs_CPr2PIj-30Qp50yS0C7_J7UNDajFTAaifoWMnTQfDQrMs_lIiUhK-WfemCGZxfUJHaBnCKAj&amp;tm_link=tm_changeloc_cities">P2</a> link to the same Ticketmaster location page even though the URLs have different URI parameters. To this end, Ziv Bar-Yossef, et al. wrote about identifying <a href="http://people.csail.mit.edu/idish/ftp/dust-full.pdf">DUST</a>: different URLs with similar text. Their method mines crawl logs to learn canonical representations for a given site and builds a set of substring and parameter substitution rules to canonicalize uncrawled links. Given a large enough web corpus, this method can clean the above links into <a href="http://www.ticketmaster.com/find_area">P1*</a> and <a href="http://www.ticketmaster.com/find_area">P2*</a>. After URLs are canonicalized, the above bloomfilter can be used to deduplicate URLs.</p>
+<p>Often URLs for a given page are not <em>exactly</em> the same. There are parameters embedded within a url which may differ. For example, both of these pages, <a href="http://www.ticketmaster.com/find_area?uri=CXytLWipvCaGhte_tQzTp0O9MzMQMviG8MCcHbagtjuf3SsE5_M6PlChy4GjP_1Ln7vBed7M88xtpH7cVmUpPmUM0q9fqRr6ymCe41xw2aSoRE9keOLA&amp;tm_link=tm_changeloc_cities">P1</a> and <a href="http://www.ticketmaster.com/find_area?uri=-OCUK0S8BLqb91tB1ek70WLlxFbd3qs_CPr2PIj-30Qp50yS0C7_J7UNDajFTAaifoWMnTQfDQrMs_lIiUhK-WfemCGZxfUJHaBnCKAj&amp;tm_link=tm_changeloc_cities">P2</a> link to the same Ticketmaster location page even though the URLs have different URI parameters. To this end, Ziv Bar-Yossef, et al. wrote about identifying <a href="http://people.csail.mit.edu/idish/ftp/dust-full.pdf">DUST</a>: different URLs with similar text. Their method mines crawl logs to learn canonical representations for a given site and builds a set of substring and parameter substitution rules to canonicalize uncrawled links. Given a large enough web corpus, this method can clean the above links into <a href="http://www.ticketmaster.com/find_area">P1*</a> and <a href="http://www.ticketmaster.com/find_area">P2*</a>. After URLs are canonicalized, the filter can be used to deduplicate URLs.</p>
 <h2 id="duplicated-content">Duplicated content</h2>
-<p>The above methods work well for identifying duplicate content within a given pay level domain (e.g., ticketmaster.com). Looking for duplicate content across domains requires crawling a link and retrieving the corresponding HTML page. Similar to duplicated URLs, once a page is returned to the crawler, duplicate content can be efficiently detected with (you guessed it!) another bloom filter. In this case we can no longer rely in Scrapy's implementation (built for link resolution) and we default to using an <a href="https://github.com/axiak/pybloomfiltermmap">efficient python implementation</a>.</p>
+<p>The above methods work well for identifying duplicate content within a given domain (e.g., ticketmaster.com). Looking for duplicate content across domains requires crawling a link and retrieving the corresponding HTML page. Similar to duplicated URLs, once a page is returned to the crawler, duplicate content can be efficiently detected with (you guessed it!) another bloom filter.</p>
 </div>
 <div class="cell border-box-sizing code_cell vbox">
 <div class="input hbox">
 <div class="prompt input_prompt">
-In&nbsp;[5]:
+In&nbsp;[6]:
 </div>
 <div class="input_area box-flex1">
 <div class="highlight"><pre><span class="kn">from</span> <span class="nn">pybloomfilter</span> <span class="kn">import</span> <span class="n">BloomFilter</span>
@@ -3452,7 +3451,7 @@ is orange in the bf? True
 <div class="cell border-box-sizing code_cell vbox">
 <div class="input hbox">
 <div class="prompt input_prompt">
-In&nbsp;[14]:
+In&nbsp;[7]:
 </div>
 <div class="input_area box-flex1">
 <div class="highlight"><pre><span class="kn">from</span> <span class="nn">nltk</span> <span class="kn">import</span> <span class="n">clean_html</span>
@@ -3499,7 +3498,7 @@ Duplicate &quot;hi!&quot; Detected
 <div class="text_cell_render border-box-sizing rendered_html">
 <h2 id="textually-similar-content-locality-sensitive-hash-lsh">Textually similar content: Locality Sensitive Hash (LSH)</h2>
 <p>The above methods work well in identifying a majority of exact duplicate content. However, there remains a class of near-duplicate web content where visible-text elements may be slightly different that can still poison search results. To identify such content, we move to a more computationally intensive method for identification: locality sensitive hashing. A great overview of LSH was published a few days ago <a href="https://engineering.eventbrite.com/multi-index-locality-sensitive-hashing-for-fun-and-profit/">on Eventbrite's blog</a>; we present a similar view.</p>
-<p>Let's start with a simple example. Two strings &quot;My beautiful dog, Woof&quot; and &quot;My beautiful dog, Woo&quot; are similar but not the exact same. We would like to detect such cases as they are semantically equivalent. Conventional string similarity methods require either:</p>
+<p>Let's start with a simple example. Two strings <code>&quot;My beautiful dog, Woof&quot;</code> and <code>&quot;My beautiful dog, Woo&quot;</code> are similar but not the exact same. We would like to detect such cases as they are semantically equivalent. Conventional string similarity methods require either:</p>
 <ol style="list-style-type: decimal">
 <li>Exact string matches (discussed above) or</li>
 <li>Computationally intensive methods</li>
@@ -3542,7 +3541,7 @@ False
 
 </div>
 <div class="text_cell_render border-box-sizing rendered_html">
-<p>Unsurprisingly, the two strings are not literal equivalents. String comparisons are blazingly fast in python, through a combination of <a href="http://stackoverflow.com/questions/12648002/what-could-affect-python-string-comparison-performance-for-strings-over-64-chara">hashtables and interning</a> but useless for the non-literal problem.</p>
+<p>Unsurprisingly, the two strings are not literal equivalents. String comparisons are fast in python, through a combination of <a href="http://stackoverflow.com/questions/12648002/what-could-affect-python-string-comparison-performance-for-strings-over-64-chara">hashtables and interning</a> but useless for the non-literal problem.</p>
 <p>A common pairwise, string similarity method is to calculate the <a href="http://en.wikipedia.org/wiki/Levenshtein_distance">Levenshtein Distance</a>. This metric calculates the <em>edit distance</em> between two strings, i.e., the number of character edits (insertion, deletion or mutation) to change one string into a second string. For example, in the case of &quot;ca<strong>t</strong>&quot; and &quot;ca<strong>r</strong>&quot; the edit distance is 1. The distance between <strong>s1</strong> and <strong>s2</strong> above is also one. A naive implementation yields a <span class="math">\(O(2^N)\)</span> algorithm where N is the length of the longer input string. There are better <span class="math">\(O(N*M)\)</span> and even <span class="math">\(\Theta(n^{1-\Theta(1/log\ log\ n)})\)</span> algorithms for Levenshtein distance calcuations, but they are all too expensive to use in general.</p>
 </div>
 <div class="text_cell_render border-box-sizing rendered_html">
@@ -3663,7 +3662,7 @@ In&nbsp;[32]:
 
 </div>
 <div class="text_cell_render border-box-sizing rendered_html">
-<p>The Jaccard successfully measures string similarity by mapping feature vectors to a float between 0 and 1. Unfortunately this method is difficult to scale for solving 2.: comparing one document against a large corpus of documents. To this end we turn to a <strong>probabilitic</strong> string encoding: LSH.</p>
+<p>The Jaccard successfully measures string similarity by mapping feature vectors to a float between 0 and 1. Unfortunately this method is difficult to scale for solving 2.: comparing one document against a large corpus of documents. To this end we turn to a probabilistic string encoding: LSH.</p>
 <p>For LSH, a set of hash tables is generated, each representing a <em>band</em> or <em>bucket</em>. Every feature extracted from a page is hashed into its own band. Ultimately the similarity metric will be derived from a weighted sum of the number of overlapping bands. This acts as a proxy to the number of overlapping features (shingles). The number of bands used presents a tradeoff between the speed of evaluating the LSH and the accuracy of identifying near-duplicate content.</p>
 <p>The neat thing here is that, in each <em>band</em> the probability that two similar hashes collide is higher if the input features are similar. If we have two strings where some of the tokens hash to the same value, then we expect more collisions than from two randomly generated strings.</p>
 </div>
@@ -3672,7 +3671,7 @@ In&nbsp;[32]:
 </div>
 
 <div class="text_cell_render border-box-sizing rendered_html">
-<p>One well known implementation of LSH is Google's <a href="simhash.googlecode.com/svn/trunk/paper/SimHashWithBib.pdf">Simhash</a>. This publication was released alongside Google's description of implementing Simhash at <a href="http://www.wwwconference.org/www2007/papers/paper215.pdf">&quot;web scale&quot;</a>. We summarize the key points below.</p>
+<p>While there are many implementiations of locality sensitive hashing, one commonly discussed implementation is Google's <a href="simhash.googlecode.com/svn/trunk/paper/SimHashWithBib.pdf">Simhash</a>. This publication was released alongside Google's description of implementing Simhash at <a href="http://www.wwwconference.org/www2007/papers/paper215.pdf">&quot;web scale&quot;</a>. We summarize the key points below.</p>
 <p>Each feature extracted from a text document is hashed, <span class="math">\(h_i\)</span> and placed into a component of a large hash vector, <span class="math">\(H\)</span>:</p>
 <p><span class="math">\[
 H = \begin{pmatrix}h_1\\h_2\\...\\h_n\end{pmatrix}
@@ -3878,6 +3877,8 @@ The bithash distance between s1 and s2 is 2
 </div>
 <div class="text_cell_render border-box-sizing rendered_html">
 <p>It's great that we have a robust way of calculating page similarity, but the whole reason for avoiding the Jaccard measure is avoid costly all-pairwise corpus comparisons. While full details are beyond the scope of this post, there is a really neat method described by <a href="http://www.wwwconference.org/www2007/papers/paper215.pdf">Google</a> to solve this exact problem. Roughly, several copies of the simhashed corpus are maintained. Each copy sorts the index by a different rage over the bits. It then becomes trivial to discover simhashes differing from an input hash by <em>at most</em> k-bits (i.e., identifying near duplicates) via a constant number of divide-and-conquer searches. This amortizes to a logarithmic look-up operation.</p>
+<h2 id="semantic-similarity">Semantic Similarity</h2>
+<p>Moving to the tip of the funnel, semantic similarity measures extract topics from documents count document overlap in topic space. It's beyond the scope of this blog post to describe the field of topic modeling but I highly recommend looking at this year's KDD conference <a href="http://www.kdd.org/kdd2014/program.html">topic modeling program</a>. Typically, topic models require extensive offline learning to build associations between high dimensional features (n-mers, words, etc.) and lower dimensional topic representations. Linear discriminant analysis is the classic method, estimating a series of latent variables to build such a dimensionality reduction function from a set of hand labeled documents.</p>
 </div>
 <div class="text_cell_render border-box-sizing rendered_html">
 <h2 id="in-the-end">In the end</h2>
